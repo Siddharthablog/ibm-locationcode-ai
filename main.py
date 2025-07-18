@@ -5,55 +5,110 @@ import re
 
 app = FastAPI()
 
-class LocationInput(BaseModel):
-    text: str
-    query: Optional[str] = None
+class QueryInput(BaseModel):
+    text: str               # Raw extracted PDF text
+    query: str              # User's question, e.g. "What is the location code for Fan 1 in MTM 9824-22A?"
 
-class Answer(BaseModel):
+class QAEntry(BaseModel):
+    part: str
+    code: str
+
+class Output(BaseModel):
+    original_query: str
+    match: Optional[QAEntry]
     answer: str
 
-# Define mapping from pdf for direct queries
-MTM_FAN_LOCATION = {
-    ("9824-22a", "fan 0"): "Un-A0",
-    ("9824-42a", "fan 0"): "Un-A0",
-    # Add more mappings as needed
+# Map Model to Table headers for extraction
+MTM_TABLE_HEADERS = {
+    "9824-22a": "Table 3. FRU location",
+    "9824-42a": "Table 4. FRU location",
+    "9043-mru": "Table 5. FRU location",
+    # Add other MTM:table pairs for your supported hardware here
 }
 
-def parse_mtm_and_part(query: str) -> Optional[tuple]:
-    """
-    Extract MTM and part info from user query using regex.
-    Accepts queries like "In MTM 9824-22A, what is location code of Fan 0?"
-    Returns lower-case mtm and part, or None.
-    """
-    mtm_match = re.search(r"mtm\s*(\d{4}-\d{2}[a-zA-Z])", query, re.I)
-    part_match = re.search(r"fan\s*\d+", query, re.I) # Only for 'Fan X'; add more as needed
-    if mtm_match and part_match:
+def parse_query(query: str):
+    """Extract mtm & part name from natural query string."""
+    mtm = None
+    part = None
+    mtm_match = re.search(r"(?:MTM\s*)?(\d{4}-[0-9a-zA-Z]+)", query, re.I)
+    if mtm_match:
         mtm = mtm_match.group(1).strip().lower()
-        part = part_match.group(0).strip().lower()
-        return (mtm, part)
-    return None
+    # Example: "Fan 0", "Power supply 2", "Memory module 5", etc — tune this regex for your needs
+    part_match = re.search(r"(Fan \d+|Power supply \d+|NVMe U\.2 drive \d+|Memory module \d+|System backplane|Drive backplane \d+|eBMC card|Control panel display|Trusted platform module card)", query, re.I)
+    if part_match:
+        part = part_match.group(0).strip()
+    return mtm, part
 
-@app.post("/find-location", response_model=Answer)
-async def find_location(input_text: LocationInput):
-    # Use the query field, or fallback to a default prompt
-    query = input_text.query or ""
-    mtm_part = parse_mtm_and_part(query)
-    if mtm_part and mtm_part in MTM_FAN_LOCATION:
-        location = MTM_FAN_LOCATION[mtm_part]
-        return {"answer": f"Fan 0 location code is {location}"}
-    
-    # fallback: scan text for pattern
-    lines = [line.strip() for line in input_text.text.splitlines() if line.strip()]
-    last_fan_line = ""
-    for idx, line in enumerate(lines):
-        # Look for "Fan 0" in the text, then check next line for location code
-        if re.fullmatch(r"Fan 0", line, re.I) and idx + 1 < len(lines):
-            next_line = lines[idx + 1]
-            if re.match(r"Un-[A-Z0-9\-]+", next_line):
-                last_fan_line = next_line
+def extract_table(text: str, header: str):
+    """Given raw PDF text and a table header, extract the relevant FRU location table."""
+    lines = text.splitlines()
+    in_table = False
+    table_lines = []
+    for i, line in enumerate(lines):
+        if header in line:
+            in_table = True
+            continue
+        if in_table:
+            # End when another Table or chapter starts
+            if (line.strip().startswith("Table ") and header not in line) or re.match(r'^\s*[A-Z]', line) and len(line.strip().split()) < 6:
                 break
+            if line.strip() != "":
+                table_lines.append(line)
+    return table_lines
 
-    if last_fan_line:
-        return {"answer": f"Fan 0 location code is {last_fan_line}"}
+def find_part_code(table_lines: List[str], part: str):
+    """Search for the part in the table and return its code."""
+    for line in table_lines:
+        # Split by multiple spaces or tabs
+        cols = re.split(r'\s{2,}|\t', line.strip())
+        if len(cols) >= 2:
+            part_name = cols[0].strip().lower().replace('\u200b', '')
+            code = cols[1].strip()
+            # Fuzzy match: ignore case/extra whitespace
+            if part_name.startswith(part.lower()):
+                return part_name, code
+    return None, None
+
+@app.post("/find-location", response_model=Output)
+async def find_location(input_data: QueryInput):
+    text = input_data.text
+    query = input_data.query
+
+    mtm, part = parse_query(query)
+
+    if not mtm or not part:
+        return {
+            "original_query": query,
+            "match": None,
+            "answer": "Could not extract model (MTM) and part name from your query. Please specify a valid question, e.g. 'What is the location code for Fan 1 in MTM 9824-22A?'"
+        }
+
+    table_header = MTM_TABLE_HEADERS.get(mtm)
+    if not table_header:
+        return {
+            "original_query": query,
+            "match": None,
+            "answer": f"Model {mtm.upper()} not supported or not found in tool's mapping."
+        }
+
+    table_lines = extract_table(text, table_header)
+    if not table_lines:
+        return {
+            "original_query": query,
+            "match": None,
+            "answer": f"Could not locate the FRU table for model {mtm.upper()} in the provided document."
+        }
+
+    part_name, code = find_part_code(table_lines, part)
+    if code:
+        return {
+            "original_query": query,
+            "match": {"part": part_name, "code": code},
+            "answer": f"{part} location code is {code}"
+        }
     else:
-        return {"answer": "Location not found for your query."}
+        return {
+            "original_query": query,
+            "match": None,
+            "answer": f"Location code not found for '{part}' in MTM {mtm.upper()}."
+        }
