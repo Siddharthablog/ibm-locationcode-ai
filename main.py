@@ -1,12 +1,13 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 import re
 
 app = FastAPI()
 
-class TextInput(BaseModel):
+class LocationInput(BaseModel):
     text: str
+    query: Optional[str] = None  # optional search term
 
 class Match(BaseModel):
     part_name: str
@@ -17,15 +18,27 @@ class Output(BaseModel):
     matches: List[Match]
 
 @app.post("/find-location", response_model=Output)
-async def find_location(input_text: TextInput):
+async def find_location(input_text: LocationInput):
     text = input_text.text.strip()
-    matches = extract_part_locations(text)
-    return {"original_text": text, "matches": matches}
+    all_matches = extract_part_locations(text)
+
+    # If query is provided, filter results
+    if input_text.query:
+        query_lower = input_text.query.lower()
+        filtered = [
+            match for match in all_matches
+            if query_lower in match.part_name.lower() or query_lower in match.location_code.lower()
+        ]
+        return {"original_text": text, "matches": filtered}
+
+    # Otherwise return all matches
+    return {"original_text": text, "matches": all_matches}
 
 def extract_part_locations(text: str) -> List[Match]:
     """
-    Pair adjacent lines where a part name is followed by a physical location code (e.g., Un-A1).
-    Handles broken tables in PDF where part and location appear on separate lines.
+    Extract part-location pairs from text where the format is:
+    Line 1: part name
+    Line 2: location code (e.g., Un-A1)
     """
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     results = []
@@ -37,8 +50,8 @@ def extract_part_locations(text: str) -> List[Match]:
 
         if re.match(r"^Un-[A-Z0-9\-]+$", next_line):
             results.append(Match(part_name=part, location_code=next_line))
-            i += 2  # move past the location line
+            i += 2
         else:
-            i += 1  # move to next line
+            i += 1
 
     return results
