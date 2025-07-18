@@ -18,15 +18,13 @@ class LocationOutput(BaseModel):
 
 @app.post("/find-location", response_model=LocationOutput)
 async def find_location(data: LocationInput):
-    # Extract part-location pairs from the text
     part_location_map = extract_part_locations(data.text)
-
     matches = []
 
     if data.query:
         query_lower = data.query.lower()
         for part, code in part_location_map.items():
-            if query_lower in part:
+            if query_lower in part or query_lower in code.lower():
                 matches.append({"part_name": part, "location_code": code})
     else:
         for part, code in part_location_map.items():
@@ -36,15 +34,22 @@ async def find_location(data: LocationInput):
 
 def extract_part_locations(text: str) -> dict:
     """
-    Extract part names and physical location codes from table-like text.
-    Returns a dictionary: { "fan 1": "Un-A1", ... }
+    Improved logic: Pair lines where a part name is followed by a location code.
+    Handles PDF table layout where lines are broken.
     """
-    pattern = r"([A-Za-z0-9()\- ,./]+?)\s+(Un-[A-Z0-9\-]+)"
-    matches = re.findall(pattern, text)
-
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
     part_location_map = {}
-    for part, code in matches:
-        normalized_part = part.strip().lower()
-        part_location_map[normalized_part] = code.strip()
+
+    i = 0
+    while i < len(lines) - 1:
+        part = lines[i]
+        next_line = lines[i + 1]
+
+        if re.match(r"^Un-[A-Z0-9\-]+$", next_line):
+            normalized_part = part.lower()
+            part_location_map[normalized_part] = next_line
+            i += 2  # Skip next line as it's already used
+        else:
+            i += 1
 
     return part_location_map
