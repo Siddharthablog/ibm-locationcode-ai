@@ -5,41 +5,46 @@ import re
 
 app = FastAPI()
 
-class TextInput(BaseModel):
+class LocationInput(BaseModel):
     text: str
-    query: Optional[str] = None  # support filtering
+    query: Optional[str] = None
 
-class PartLocation(BaseModel):
+class LocationMatch(BaseModel):
     part_name: str
     location_code: str
 
-class Output(BaseModel):
-    query: Optional[str]
-    matches: List[PartLocation]
+class LocationOutput(BaseModel):
+    matches: List[LocationMatch]
 
-@app.post("/find-parts", response_model=Output)
-async def find_parts(input_text: TextInput):
-    text = input_text.text.strip()
-    query = input_text.query.strip().lower() if input_text.query else None
-    parts = []
+@app.post("/find-location", response_model=LocationOutput)
+async def find_location(data: LocationInput):
+    # Extract part-location pairs from the text
+    part_location_map = extract_part_locations(data.text)
 
-    # Basic pattern to extract part name and location
-    pattern = re.compile(
-        r"(?P<name>[A-Z][^\n\r]{1,100}?)\s+(?P<location>Un(?:-[A-Z0-9]+)+)",
-        re.MULTILINE
-    )
+    matches = []
 
-    for match in pattern.finditer(text):
-        name = match.group("name").strip()
-        code = match.group("location").strip()
+    if data.query:
+        query_lower = data.query.lower()
+        for part, code in part_location_map.items():
+            if query_lower in part:
+                matches.append({"part_name": part, "location_code": code})
+    else:
+        for part, code in part_location_map.items():
+            matches.append({"part_name": part, "location_code": code})
 
-        if query:
-            if query in name.lower() or query in code.lower():
-                parts.append(PartLocation(part_name=name, location_code=code))
-        else:
-            parts.append(PartLocation(part_name=name, location_code=code))
+    return {"matches": matches}
 
-    return {
-        "query": query,
-        "matches": parts
-    }
+def extract_part_locations(text: str) -> dict:
+    """
+    Extract part names and physical location codes from table-like text.
+    Returns a dictionary: { "fan 1": "Un-A1", ... }
+    """
+    pattern = r"([A-Za-z0-9()\- ,./]+?)\s+(Un-[A-Z0-9\-]+)"
+    matches = re.findall(pattern, text)
+
+    part_location_map = {}
+    for part, code in matches:
+        normalized_part = part.strip().lower()
+        part_location_map[normalized_part] = code.strip()
+
+    return part_location_map
